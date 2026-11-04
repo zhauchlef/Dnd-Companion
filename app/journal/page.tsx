@@ -31,6 +31,17 @@ type LocationNote = {
   pointsOfInterest: string;
 };
 
+type QuestStatus = "Active" | "Completed" | "Failed";
+
+type Quest = {
+  id: string;
+  title: string;
+  givenBy: string;
+  reward: string;
+  status: QuestStatus;
+  description: string;
+};
+
 type JournalData = {
   notes?: CampaignNote[];
   npcs?: NPC[];
