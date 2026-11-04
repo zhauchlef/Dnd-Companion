@@ -2,6 +2,7 @@
  
 import { useState } from "react";
 import Sidebar from "./Sidebar";
+import CampaignShell from "./CampaignShell";
  
 export default function MainLayout({ children }: { children: React.ReactNode }) {
   const [isCollapsed, setIsCollapsed] = useState(false); // desktop only
@@ -44,8 +45,9 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
           isCollapsed ? "md:pl-16" : "md:pl-64"
         }`}
       >
-        {children}
+        <CampaignShell>{children}</CampaignShell>
       </main>
     </div>
   );
 }
+ 
