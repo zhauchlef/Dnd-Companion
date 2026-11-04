@@ -1,7 +1,7 @@
-
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import type { MouseEvent } from "react";
 import { uploadMap } from "@/lib/mapStorage";
 import { supabase } from "@/lib/supabase";
 
@@ -39,6 +39,17 @@ type MapAppState = {
   activeMapId: string;
   maps: SavedMap[];
 };
+
+type MapDatabaseRow = {
+  id: string;
+  name: string;
+  image_path: string | null;
+  image_url: string | null;
+  parent_map_id: string | null;
+  pins: MapPin[];
+};
+
+/* DEFAULT MAPS */
 
 const DEFAULT_MAPS: SavedMap[] = [
   {
@@ -99,16 +110,42 @@ const INITIAL_STATE: MapAppState = {
   maps: DEFAULT_MAPS,
 };
 
+/* CATEGORY STYLING */
+
 const CATEGORY_COLORS: Record<
   PinCategory,
   { bg: string; icon: string; label: string }
 > = {
-  city: { bg: "bg-blue-600 border-blue-400", icon: "🏰", label: "City / Settlement" },
-  dungeon: { bg: "bg-red-700 border-red-500", icon: "💀", label: "Dungeon / Cave" },
-  tavern: { bg: "bg-amber-600 border-amber-400", icon: "🍺", label: "Tavern / Shop" },
-  quest: { bg: "bg-purple-600 border-purple-400", icon: "📜", label: "Quest Hub" },
-  hazard: { bg: "bg-yellow-600 border-yellow-400", icon: "⚠️", label: "Hazard / Danger" },
-  landmark: { bg: "bg-emerald-600 border-emerald-400", icon: "📍", label: "Landmark / Other" },
+  city: {
+    bg: "bg-blue-600 border-blue-400",
+    icon: "🏰",
+    label: "City / Settlement",
+  },
+  dungeon: {
+    bg: "bg-red-700 border-red-500",
+    icon: "💀",
+    label: "Dungeon / Cave",
+  },
+  tavern: {
+    bg: "bg-amber-600 border-amber-400",
+    icon: "🍺",
+    label: "Tavern / Shop",
+  },
+  quest: {
+    bg: "bg-purple-600 border-purple-400",
+    icon: "📜",
+    label: "Quest Hub",
+  },
+  hazard: {
+    bg: "bg-yellow-600 border-yellow-400",
+    icon: "⚠️",
+    label: "Hazard / Danger",
+  },
+  landmark: {
+    bg: "bg-emerald-600 border-emerald-400",
+    icon: "📍",
+    label: "Landmark / Other",
+  },
 };
 
 const inputCls =
@@ -120,21 +157,59 @@ const panelCls =
 const btnCls =
   "rounded-lg bg-[#80643d] px-4 py-2 font-bold text-white hover:bg-[#a17b45]";
 
-/* PRIVATE BUCKET IMAGE URL */
+/* SUPABASE IMAGE HELPERS */
 
 async function getSignedMapUrl(path: string) {
   const { data, error } = await supabase.storage
     .from("world-maps")
     .createSignedUrl(path, 60 * 60 * 24 * 7);
 
-  if (error) throw new Error(error.message);
+  if (error) {
+    throw new Error(error.message);
+  }
 
   return data.signedUrl;
+}
+
+/* CONVERT MAPS TO AND FROM DATABASE ROWS */
+
+function mapToDatabaseRow(map: SavedMap): MapDatabaseRow {
+  return {
+    id: map.id,
+    name: map.name,
+    image_path: map.storagePath || null,
+    image_url: map.storagePath ? null : map.url || null,
+    parent_map_id: map.parentMapId || null,
+    pins: map.pins || [],
+  };
+}
+
+async function databaseRowToMap(row: MapDatabaseRow): Promise<SavedMap> {
+  let url = row.image_url || "";
+
+  if (row.image_path) {
+    try {
+      url = await getSignedMapUrl(row.image_path);
+    } catch (error) {
+      console.warn(`Could not refresh image for ${row.name}:`, error);
+      url = "";
+    }
+  }
+
+  return {
+    id: row.id,
+    name: row.name,
+    url,
+    storagePath: row.image_path || undefined,
+    parentMapId: row.parent_map_id,
+    pins: Array.isArray(row.pins) ? row.pins : [],
+  };
 }
 
 export default function WorldMapPage() {
   const [appState, setAppState] = useState<MapAppState>(INITIAL_STATE);
   const [loaded, setLoaded] = useState(false);
+  const [syncStatus, setSyncStatus] = useState("Connecting to shared campaign...");
 
   const [newMapName, setNewMapName] = useState("");
   const [newParentMapId, setNewParentMapId] = useState("");
@@ -160,53 +235,208 @@ export default function WorldMapPage() {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  /* LOAD SAVED MAPS AND REFRESH PRIVATE IMAGE LINKS */
+  const isMountedRef = useRef(true);
+
+  /* SAVE ONE MAP TO SUPABASE */
+
+  async function saveMapToCloud(map: SavedMap) {
+    const { error } = await supabase
+      .from("campaign_maps")
+      .upsert(mapToDatabaseRow(map), {
+        onConflict: "id",
+      });
+
+    if (error) {
+      console.error("Could not save map to Supabase:", error);
+      throw error;
+    }
+  }
+
+  /* LOAD MAPS FROM SUPABASE */
+
+  async function fetchCloudMaps(): Promise<SavedMap[]> {
+    const { data, error } = await supabase
+      .from("campaign_maps")
+      .select("id, name, image_path, image_url, parent_map_id, pins");
+
+    if (error) {
+      throw error;
+    }
+
+    const rows = (data || []) as MapDatabaseRow[];
+
+    return Promise.all(rows.map(databaseRowToMap));
+  }
+
+  /* INITIAL LOAD AND LOCAL DATA MIGRATION */
 
   useEffect(() => {
+    let active = true;
+
     async function loadMaps() {
       try {
-        const saved = localStorage.getItem("dnd-world-map-app");
+        const { data, error } = await supabase
+          .from("campaign_maps")
+          .select("id, name, image_path, image_url, parent_map_id, pins");
 
-        if (saved) {
-          const parsed: MapAppState = JSON.parse(saved);
-
-          const refreshedMaps = await Promise.all(
-  parsed.maps.map(async (map) => {
-    if (!map.storagePath) return map;
-
-    try {
-      const url = await getSignedMapUrl(map.storagePath);
-      return { ...map, url };
-    } catch (error) {
-      console.warn(
-        `Could not load image for ${map.name}:`,
-        error
-      );
-
-      return {
-        ...map,
-        url: "",
-      };
-    }
-  })
-);
-
-          setAppState({
-            ...parsed,
-            maps: refreshedMaps,
-          });
+        if (error) {
+          throw error;
         }
+
+        let rows = (data || []) as MapDatabaseRow[];
+
+        /*
+         * If Supabase is empty, import the existing browser maps.
+         * The localStorage copy is not deleted.
+         */
+
+        if (rows.length === 0) {
+          let mapsToImport: SavedMap[] = INITIAL_STATE.maps;
+
+          const saved = localStorage.getItem("dnd-world-map-app");
+
+          if (saved) {
+            try {
+              const parsed = JSON.parse(saved) as MapAppState;
+
+              if (Array.isArray(parsed.maps) && parsed.maps.length > 0) {
+                mapsToImport = parsed.maps;
+              }
+            } catch (error) {
+              console.error("Could not read existing local maps:", error);
+            }
+          }
+
+          const { error: importError } = await supabase
+            .from("campaign_maps")
+            .upsert(mapsToImport.map(mapToDatabaseRow), {
+              onConflict: "id",
+              ignoreDuplicates: true,
+            });
+
+          if (importError) {
+            throw importError;
+          }
+
+          const refreshed = await supabase
+            .from("campaign_maps")
+            .select("id, name, image_path, image_url, parent_map_id, pins");
+
+          if (refreshed.error) {
+            throw refreshed.error;
+          }
+
+          rows = (refreshed.data || []) as MapDatabaseRow[];
+        }
+
+        const cloudMaps = await Promise.all(rows.map(databaseRowToMap));
+
+        if (!active) return;
+
+        if (cloudMaps.length > 0) {
+          setAppState((previous) => ({
+            activeMapId: cloudMaps.some(
+              (map) => map.id === previous.activeMapId
+            )
+              ? previous.activeMapId
+              : cloudMaps[0].id,
+            maps: cloudMaps,
+          }));
+        }
+
+        setSyncStatus("Connected to shared campaign");
       } catch (error) {
-        console.error("Could not load map data:", error);
+        console.error("Could not load shared maps:", error);
+
+        /*
+         * If cloud loading fails, preserve and display local data.
+         * Do not overwrite the local backup with an empty state.
+         */
+
+        try {
+          const saved = localStorage.getItem("dnd-world-map-app");
+
+          if (saved) {
+            const parsed = JSON.parse(saved) as MapAppState;
+
+            if (Array.isArray(parsed.maps) && parsed.maps.length > 0) {
+              if (active) setAppState(parsed);
+            }
+          }
+        } catch (localError) {
+          console.error("Could not load local map backup:", localError);
+        }
+
+        if (active) {
+          setSyncStatus("Cloud connection failed — using local data");
+        }
       } finally {
-        setLoaded(true);
+        if (active) setLoaded(true);
       }
     }
 
     loadMaps();
+
+    return () => {
+      active = false;
+    };
   }, []);
 
-  /* SAVE MAP METADATA */
+  /* REALTIME UPDATES FROM OTHER VISITORS */
+
+  useEffect(() => {
+    if (!loaded) return;
+
+    let active = true;
+
+    const channel = supabase
+      .channel("shared-campaign-maps")
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "campaign_maps",
+        },
+        async () => {
+          try {
+            const cloudMaps = await fetchCloudMaps();
+
+            if (!active) return;
+
+            setAppState((previous) => ({
+              activeMapId: cloudMaps.some(
+                (map) => map.id === previous.activeMapId
+              )
+                ? previous.activeMapId
+                : cloudMaps[0]?.id || "",
+              maps: cloudMaps,
+            }));
+
+            setSyncStatus("Connected to shared campaign");
+          } catch (error) {
+            console.error("Could not refresh shared maps:", error);
+            setSyncStatus("Could not refresh shared maps");
+          }
+        }
+      )
+      .subscribe((status) => {
+        if (!active) return;
+
+        if (status === "SUBSCRIBED") {
+          setSyncStatus("Connected to shared campaign");
+        } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          setSyncStatus("Live updates disconnected");
+        }
+      });
+
+    return () => {
+      active = false;
+      void supabase.removeChannel(channel);
+    };
+  }, [loaded]);
+
+  /* SAVE A LOCAL BACKUP */
 
   useEffect(() => {
     if (!loaded) return;
@@ -217,14 +447,24 @@ export default function WorldMapPage() {
         JSON.stringify(appState)
       );
     } catch (error) {
-      console.error("Could not save map data:", error);
+      console.error("Could not save local map backup:", error);
     }
   }, [appState, loaded]);
+
+  /* CLEAN UP MOUNT STATE */
+
+  useEffect(() => {
+    isMountedRef.current = true;
+
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   if (!loaded) {
     return (
       <div className="bg-[#211c17] p-8 text-[#e5bd70]">
-        Loading maps...
+        Loading shared maps...
       </div>
     );
   }
@@ -234,7 +474,11 @@ export default function WorldMapPage() {
     appState.maps[0];
 
   if (!currentMap) {
-    return <div className="p-8 text-white">No maps found.</div>;
+    return (
+      <div className="bg-[#211c17] p-8 text-white">
+        No maps found. Try refreshing the page.
+      </div>
+    );
   }
 
   const parentMap = currentMap.parentMapId
@@ -279,10 +523,12 @@ export default function WorldMapPage() {
         pins: [],
       };
 
-      setAppState((prev) => ({
-        ...prev,
+      await saveMapToCloud(newMap);
+
+      setAppState((previous) => ({
+        ...previous,
         activeMapId: newMap.id,
-        maps: [...prev.maps, newMap],
+        maps: [...previous.maps, newMap],
       }));
 
       setNewMapName("");
@@ -293,7 +539,7 @@ export default function WorldMapPage() {
         fileInputRef.current.value = "";
       }
 
-      setUploadStatus("Map uploaded successfully!");
+      setUploadStatus("Map uploaded and shared successfully!");
     } catch (error) {
       console.error("Map upload failed:", error);
 
@@ -307,7 +553,7 @@ export default function WorldMapPage() {
 
   /* DELETE MAP */
 
-  const deleteMap = (id: string) => {
+  const deleteMap = async (id: string) => {
     if (appState.maps.length <= 1) {
       alert("You must keep at least one map in your library.");
       return;
@@ -327,20 +573,49 @@ export default function WorldMapPage() {
         m.parentMapId === id ? { ...m, parentMapId: null } : m
       );
 
-    setAppState((prev) => ({
-      ...prev,
-      activeMapId: filtered[0].id,
-      maps: filtered,
-    }));
+    try {
+      /*
+       * Save child maps after removing their parent link,
+       * then delete the selected map from the database.
+       */
 
-    setSelectedPin(null);
+      const changedChildren = filtered.filter(
+        (map) => map.parentMapId === null &&
+          appState.maps.some(
+            (oldMap) =>
+              oldMap.id === map.id && oldMap.parentMapId === id
+          )
+      );
+
+      for (const child of changedChildren) {
+        await saveMapToCloud(child);
+      }
+
+      const { error } = await supabase
+        .from("campaign_maps")
+        .delete()
+        .eq("id", id);
+
+      if (error) throw error;
+
+      setAppState((previous) => ({
+        ...previous,
+        activeMapId: filtered[0].id,
+        maps: filtered,
+      }));
+
+      setSelectedPin(null);
+    } catch (error) {
+      console.error("Could not delete map:", error);
+      alert("Could not delete the map from the shared campaign.");
+    }
   };
 
   /* PAN AND ZOOM */
 
   const handleZoom = (delta: number) => {
-    setScale((prev) =>
-      Math.min(3.5, Math.max(0.6, prev + delta))
+    setScale((previous) =>
+      Math.min(3.5, Math.max(0.6, previous + delta))
     );
   };
 
@@ -349,7 +624,7 @@ export default function WorldMapPage() {
     setPosition({ x: 0, y: 0 });
   };
 
-  const handleMouseDown = (e: React.MouseEvent) => {
+  const handleMouseDown = (e: MouseEvent<HTMLDivElement>) => {
     if (isPlacingMarker) return;
 
     setIsDragging(true);
@@ -359,7 +634,7 @@ export default function WorldMapPage() {
     });
   };
 
-  const handleMouseMove = (e: React.MouseEvent) => {
+  const handleMouseMove = (e: MouseEvent<HTMLDivElement>) => {
     if (!isDragging) return;
 
     setPosition({
@@ -372,7 +647,7 @@ export default function WorldMapPage() {
 
   /* PLACE MARKER */
 
-  const handleMapClick = (e: React.MouseEvent<HTMLDivElement>) => {
+  const handleMapClick = async (e: MouseEvent<HTMLDivElement>) => {
     if (!isPlacingMarker || !mapContainerRef.current) return;
 
     const rect = mapContainerRef.current.getBoundingClientRect();
@@ -390,20 +665,30 @@ export default function WorldMapPage() {
       targetSubmapId: markerTargetSubmap || undefined,
     };
 
-    setAppState((prev) => ({
-      ...prev,
-      maps: prev.maps.map((m) =>
-        m.id === currentMap.id
-          ? { ...m, pins: [...m.pins, newPin] }
-          : m
-      ),
-    }));
+    const updatedMap: SavedMap = {
+      ...currentMap,
+      pins: [...currentMap.pins, newPin],
+    };
 
-    setSelectedPin(newPin);
-    setIsPlacingMarker(false);
-    setMarkerName("");
-    setMarkerDesc("");
-    setMarkerTargetSubmap("");
+    try {
+      await saveMapToCloud(updatedMap);
+
+      setAppState((previous) => ({
+        ...previous,
+        maps: previous.maps.map((map) =>
+          map.id === currentMap.id ? updatedMap : map
+        ),
+      }));
+
+      setSelectedPin(newPin);
+      setIsPlacingMarker(false);
+      setMarkerName("");
+      setMarkerDesc("");
+      setMarkerTargetSubmap("");
+    } catch (error) {
+      console.error("Could not save marker:", error);
+      alert("Could not save this marker to the shared campaign.");
+    }
   };
 
   /* EDIT MARKER */
@@ -411,44 +696,57 @@ export default function WorldMapPage() {
   const updateSelectedPin = (patch: Partial<MapPin>) => {
     if (!selectedPin) return;
 
-    const updated = { ...selectedPin, ...patch };
-    setSelectedPin(updated);
+    const updatedPin = { ...selectedPin, ...patch };
 
-    setAppState((prev) => ({
-      ...prev,
-      maps: prev.maps.map((m) =>
-        m.id === currentMap.id
-          ? {
-              ...m,
-              pins: m.pins.map((p) =>
-                p.id === selectedPin.id ? updated : p
-              ),
-            }
-          : m
+    const updatedMap: SavedMap = {
+      ...currentMap,
+      pins: currentMap.pins.map((pin) =>
+        pin.id === selectedPin.id ? updatedPin : pin
+      ),
+    };
+
+    setSelectedPin(updatedPin);
+
+    setAppState((previous) => ({
+      ...previous,
+      maps: previous.maps.map((map) =>
+        map.id === currentMap.id ? updatedMap : map
       ),
     }));
+
+    void saveMapToCloud(updatedMap).catch((error) => {
+      console.error("Could not save marker changes:", error);
+      setSyncStatus("Could not save marker changes");
+    });
   };
 
   /* DELETE MARKER */
 
-  const deleteSelectedPin = () => {
+  const deleteSelectedPin = async () => {
     if (!selectedPin) return;
 
-    setAppState((prev) => ({
-      ...prev,
-      maps: prev.maps.map((m) =>
-        m.id === currentMap.id
-          ? {
-              ...m,
-              pins: m.pins.filter(
-                (p) => p.id !== selectedPin.id
-              ),
-            }
-          : m
+    const updatedMap: SavedMap = {
+      ...currentMap,
+      pins: currentMap.pins.filter(
+        (pin) => pin.id !== selectedPin.id
       ),
-    }));
+    };
 
-    setSelectedPin(null);
+    try {
+      await saveMapToCloud(updatedMap);
+
+      setAppState((previous) => ({
+        ...previous,
+        maps: previous.maps.map((map) =>
+          map.id === currentMap.id ? updatedMap : map
+        ),
+      }));
+
+      setSelectedPin(null);
+    } catch (error) {
+      console.error("Could not delete marker:", error);
+      alert("Could not delete this marker from the shared campaign.");
+    }
   };
 
   return (
@@ -463,6 +761,9 @@ export default function WorldMapPage() {
           </h1>
           <p className="text-sm text-[#b8a17d]">
             Link interior houses, towns, and local maps as submaps of your overworld.
+          </p>
+          <p className="mt-2 text-xs text-[#b8a17d]">
+            Shared campaign status: {syncStatus}
           </p>
         </div>
 
@@ -556,8 +857,8 @@ export default function WorldMapPage() {
                 <div
                   key={m.id}
                   onClick={() => {
-                    setAppState((prev) => ({
-                      ...prev,
+                    setAppState((previous) => ({
+                      ...previous,
                       activeMapId: m.id,
                     }));
                     setSelectedPin(null);
@@ -582,7 +883,7 @@ export default function WorldMapPage() {
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      deleteMap(m.id);
+                      void deleteMap(m.id);
                     }}
                     className="rounded-lg bg-red-900 px-3 py-1.5 text-xs font-bold text-white hover:bg-red-700"
                   >
@@ -602,8 +903,8 @@ export default function WorldMapPage() {
               {parentMap && (
                 <button
                   onClick={() => {
-                    setAppState((prev) => ({
-                      ...prev,
+                    setAppState((previous) => ({
+                      ...previous,
                       activeMapId: parentMap.id,
                     }));
                     setSelectedPin(null);
@@ -649,8 +950,8 @@ export default function WorldMapPage() {
                   <button
                     key={sub.id}
                     onClick={() => {
-                      setAppState((prev) => ({
-                        ...prev,
+                      setAppState((previous) => ({
+                        ...previous,
                         activeMapId: sub.id,
                       }));
                       setSelectedPin(null);
@@ -876,8 +1177,8 @@ export default function WorldMapPage() {
                       {selectedPin.targetSubmapId && (
                         <button
                           onClick={() => {
-                            setAppState((prev) => ({
-                              ...prev,
+                            setAppState((previous) => ({
+                              ...previous,
                               activeMapId: selectedPin.targetSubmapId!,
                             }));
                             setSelectedPin(null);
@@ -900,6 +1201,23 @@ export default function WorldMapPage() {
                         onChange={(e) =>
                           updateSelectedPin({
                             description: e.target.value,
+                          })
+                        }
+                        className={`${inputCls} w-full text-sm`}
+                      />
+                    </div>
+
+                    <div>
+                      <label className="mb-1 block text-xs font-bold text-[#b8a17d]">
+                        Secrets / DM Notes
+                      </label>
+
+                      <textarea
+                        rows={3}
+                        value={selectedPin.secrets || ""}
+                        onChange={(e) =>
+                          updateSelectedPin({
+                            secrets: e.target.value,
                           })
                         }
                         className={`${inputCls} w-full text-sm`}
