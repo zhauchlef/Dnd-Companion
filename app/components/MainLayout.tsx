@@ -1,4 +1,3 @@
-Mainlayout · TSX
 "use client";
  
 import { useState } from "react";
