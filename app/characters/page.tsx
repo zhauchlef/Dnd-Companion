@@ -436,166 +436,167 @@ export const CLASSES: Record<string, ClassData> = {
   },
 };
 
+
 export default function CharactersPage() {
   const [chars, setChars] = useState<Character[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [hpAmount, setHpAmount] = useState(1);
 
-  useEffect(() => {
-  let active = true;
-
+  // Save a character to the shared Supabase database.
   async function saveCharacterToCloud(character: Character) {
-  const { error } = await supabase
-    .from("campaign_characters")
-    .upsert({
-      id: character.id,
-      name: character.name || "Unnamed",
-      data: character,
-    });
+    const { error } = await supabase
+      .from("campaign_characters")
+      .upsert({
+        id: character.id,
+        name: character.name || "Unnamed",
+        data: character,
+      });
 
-  if (error) {
-    console.error("Could not save character:", error);
-    alert("Could not save this character to the shared campaign.");
-  }
-}
-
-  async function loadCharacters() {
-    try {
-      // First, load the shared characters from Supabase.
-      let { data, error } = await supabase
-        .from("campaign_characters")
-        .select("id, name, data");
-
-      if (error) throw error;
-
-      // If the shared table is empty, import this browser's existing
-      // characters once. This preserves your existing character sheets.
-      if ((!data || data.length === 0)) {
-        const saved = localStorage.getItem("dnd-characters");
-
-        if (saved) {
-          const localCharacters = JSON.parse(saved) as Character[];
-
-          if (localCharacters.length > 0) {
-            const rows = localCharacters.map((character) => ({
-              id: character.id,
-              name: character.name || "Unnamed",
-              data: character,
-            }));
-
-            const { error: insertError } = await supabase
-              .from("campaign_characters")
-              .upsert(rows, {
-                onConflict: "id",
-                ignoreDuplicates: true,
-              });
-
-            if (insertError) throw insertError;
-          }
-        }
-
-        // Read again, including any characters just imported.
-        const result = await supabase
-          .from("campaign_characters")
-          .select("id, name, data");
-
-        if (result.error) throw result.error;
-        data = result.data;
-      }
-
-      if (active) {
-        setChars((data || []).map((row) => row.data as Character));
-      }
-    } catch (error) {
-      console.error("Could not load shared characters:", error);
-    } finally {
-      if (active) setLoaded(true);
+    if (error) {
+      console.error("Could not save character:", error);
+      alert("Could not save this character to the shared campaign.");
     }
   }
 
-  loadCharacters();
+  // Load shared characters and listen for changes from other players.
+  useEffect(() => {
+    let active = true;
 
-  // Listen for changes made by other players.
-  const channel = supabase
-    .channel("shared-character-changes")
-    .on(
-      "postgres_changes",
-      {
-        event: "*",
-        schema: "public",
-        table: "campaign_characters",
-      },
-      async () => {
-        const { data, error } = await supabase
+    async function loadCharacters() {
+      try {
+        let { data, error } = await supabase
           .from("campaign_characters")
           .select("id, name, data");
 
-        if (error) {
-          console.error("Could not refresh characters:", error);
-          return;
+        if (error) throw error;
+
+        // Import existing local characters if the shared table is empty.
+        if (!data || data.length === 0) {
+          const saved = localStorage.getItem("dnd-characters");
+
+          if (saved) {
+            const localCharacters = JSON.parse(saved) as Character[];
+
+            if (localCharacters.length > 0) {
+              const rows = localCharacters.map((character) => ({
+                id: character.id,
+                name: character.name || "Unnamed",
+                data: character,
+              }));
+
+              const { error: insertError } = await supabase
+                .from("campaign_characters")
+                .upsert(rows, {
+                  onConflict: "id",
+                  ignoreDuplicates: true,
+                });
+
+              if (insertError) throw insertError;
+            }
+          }
+
+          const result = await supabase
+            .from("campaign_characters")
+            .select("id, name, data");
+
+          if (result.error) throw result.error;
+          data = result.data;
         }
 
         if (active) {
           setChars((data || []).map((row) => row.data as Character));
         }
+      } catch (error) {
+        console.error("Could not load shared characters:", error);
+      } finally {
+        if (active) setLoaded(true);
       }
-    )
-    .subscribe();
+    }
 
-  return () => {
-    active = false;
-    supabase.removeChannel(channel);
-  };
-}, []);
+    loadCharacters();
 
-useEffect(() => {
-  if (loaded) {
-    localStorage.setItem("dnd-characters", JSON.stringify(chars));
-  }
-}, [chars, loaded]);
+    const channel = supabase
+      .channel("shared-character-changes")
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "campaign_characters",
+        },
+        async () => {
+          const { data, error } = await supabase
+            .from("campaign_characters")
+            .select("id, name, data");
+
+          if (error) {
+            console.error("Could not refresh characters:", error);
+            return;
+          }
+
+          if (active) {
+            setChars((data || []).map((row) => row.data as Character));
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      active = false;
+      void supabase.removeChannel(channel);
+    };
+  }, []);
+
+  // Keep a local backup as well.
+  useEffect(() => {
+    if (loaded) {
+      localStorage.setItem("dnd-characters", JSON.stringify(chars));
+    }
+  }, [chars, loaded]);
 
   const c = chars.find((x) => x.id === selectedId);
 
   function update(patch: Partial<Character>) {
-  const character = chars.find((item) => item.id === selectedId);
-  if (!character) return;
+    const character = chars.find((item) => item.id === selectedId);
+    if (!character) return;
 
-  const updatedCharacter = { ...character, ...patch };
+    const updatedCharacter = { ...character, ...patch };
 
-  setChars((prev) =>
-    prev.map((item) =>
-      item.id === selectedId ? updatedCharacter : item
-    )
-  );
+    setChars((prev) =>
+      prev.map((item) =>
+        item.id === selectedId ? updatedCharacter : item
+      )
+    );
 
-  void saveCharacterToCloud(updatedCharacter);
-}
+    void saveCharacterToCloud(updatedCharacter);
+  }
 
   function addCharacter() {
     const created = newCharacter();
+
     setChars((prev) => [...prev, created]);
     setSelectedId(created.id);
 
-    void saveCharacterToCloud(character);
+    void saveCharacterToCloud(created);
   }
 
   async function deleteCharacter(id: string) {
-  setChars((prev) => prev.filter((character) => character.id !== id));
+    setChars((prev) => prev.filter((character) => character.id !== id));
 
-  const { error } = await supabase
-    .from("campaign_characters")
-    .delete()
-    .eq("id", id);
+    const { error } = await supabase
+      .from("campaign_characters")
+      .delete()
+      .eq("id", id);
 
-  if (error) {
-    console.error("Could not delete shared character:", error);
-    alert("Could not delete this character from the shared campaign.");
-  }
+    if (error) {
+      console.error("Could not delete shared character:", error);
+      alert("Could not delete this character from the shared campaign.");
+    }
 
-  if (selectedId === id) {
-    setSelectedId(null);
-  }
+    if (selectedId === id) {
+      setSelectedId(null);
+    }
   }
 
   function damage() {
@@ -830,7 +831,7 @@ useEffect(() => {
             ← All characters
           </button>
           <button
-            onClick={deleteCharacter}
+          onClick={() => deleteCharacter(c.id)}
             className="rounded-lg bg-red-900 px-4 py-2 text-sm text-white hover:bg-red-700"
           >
             Delete character
