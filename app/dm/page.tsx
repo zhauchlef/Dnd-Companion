@@ -693,7 +693,7 @@ export default function DmScreenPage() {
                               {cmb.name}
                             </h4>
 
-                            <spa
+                            <span
                               className={`rounded border px-2 py-0.5 text-[10px] font-bold ${
                                 cmb.isPlayer
                                   ? "border-blue-600 bg-blue-900 text-blue-200"
