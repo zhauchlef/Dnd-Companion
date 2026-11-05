@@ -1047,11 +1047,21 @@ export default function WorldMapPage() {
                     transform: `translate(${position.x}px, ${position.y}px) scale(${scale})`,
                   }}
                 >
+                  {currentMap.url ? (
                   <img
                     src={currentMap.url}
                     alt={currentMap.name}
                     className="h-full w-full object-contain pointer-events-none"
                   />
+                ) : (
+                  <div className="flex h-full w-full flex-col items-center justify-center text-center text-[#b8a17d]">
+                    <span className="mb-3 text-5xl">🗺️</span>
+                    <p className="text-lg font-bold">No Map Image Available</p>
+                    <p className="mt-2 text-sm">
+                      Upload a map image or check your Supabase storage connection.
+                    </p>
+                  </div>
+                )}
 
                   {currentMap.pins.map((pin) => {
                     const catInfo =
@@ -1071,14 +1081,14 @@ export default function WorldMapPage() {
                           left: `${pin.x}%`,
                           top: `${pin.y}%`,
                         }}
-                        className={`absolute z-10 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 p-1.5 shadow-lg transition-transform hover:scale-125 ${catInfo.bg} ${
+                        className={`absolute z-10 -translate-x-1/2 -translate-y-1/2 rounded-full border p-0.5 shadow-lg transition-transform hover:scale-125 ${catInfo.bg} ${
                           isSelected
                             ? "ring-4 ring-[#e5bd70] scale-125"
                             : ""
                         }`}
                         title={pin.title}
                       >
-                        <span className="text-sm">
+                        <span className="text-[9px]">
                           {catInfo.icon}
                         </span>
                       </button>
