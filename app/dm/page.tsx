@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-
+import { supabase } from "@/lib/supabase";
 /* ==========================================================================
    TYPES & STORAGE
    ========================================================================== */
@@ -99,97 +99,261 @@ export default function DmScreenPage() {
   const [newEnemyInit, setNewEnemyInit] = useState(10);
   const [newEnemyNotes, setNewEnemyNotes] = useState("");
 
-  /* Load characters */
+/* Load and sync player characters from Supabase */
+
+  const [cloudStatus, setCloudStatus] = useState("Connecting to cloud...");
 
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem("dnd-characters");
+    let active = true;
 
-      if (saved) {
-        setCharacters(JSON.parse(saved));
+    const loadCloudCharacters = async () => {
+      try {
+        const { data, error } = await supabase
+          .from("campaign_characters")
+          .select("id, name, data")
+          .order("name", { ascending: true });
+
+        if (error) throw error;
+        if (!active) return;
+
+        const cloudCharacters: Character[] = (data || [])
+          .map((row: { id: string; name: string; data: unknown }) => {
+            const characterData = row.data as Character | null;
+            if (!characterData) return null;
+            return {
+              ...characterData,
+              id: row.id,
+              name: characterData.name || row.name || "Unnamed Adventurer",
+            };
+          })
+          .filter((character): character is Character => character !== null);
+
+        // If the cloud is empty, keep existing browser characters and copy
+        // them up once. This does not delete or clear the local backup.
+        if (cloudCharacters.length === 0) {
+          const saved = localStorage.getItem("dnd-characters");
+          const localCharacters: Character[] = saved ? JSON.parse(saved) : [];
+
+          if (localCharacters.length > 0) {
+            const rows = localCharacters.map((character) => ({
+              id: character.id,
+              name: character.name || "Unnamed Adventurer",
+              data: character,
+            }));
+
+            const { error: migrationError } = await supabase
+              .from("campaign_characters")
+              .upsert(rows, { onConflict: "id" });
+
+            if (migrationError) throw migrationError;
+            if (!active) return;
+
+            setCharacters(localCharacters);
+            localStorage.setItem("dnd-characters", JSON.stringify(localCharacters));
+            setCloudStatus("Cloud connected — local characters uploaded");
+          } else {
+            setCharacters([]);
+            setCloudStatus("Cloud connected");
+          }
+        } else {
+          setCharacters(cloudCharacters);
+          localStorage.setItem("dnd-characters", JSON.stringify(cloudCharacters));
+          setCloudStatus("Cloud synced");
+        }
+      } catch (error) {
+        console.error("Could not load characters from Supabase:", error);
+
+        // If cloud access fails, fall back to the existing browser copy.
+        try {
+          const saved = localStorage.getItem("dnd-characters");
+          if (saved && active) setCharacters(JSON.parse(saved));
+        } catch {
+          console.error("Could not load local party characters");
+        }
+
+        if (active) setCloudStatus("Cloud unavailable — showing local copy");
+      } finally {
+        if (active) setLoaded(true);
       }
-    } catch {
-      console.error("Could not load party characters");
-    }
+    };
 
-    setLoaded(true);
+    const channel = supabase
+      .channel("dm-campaign-characters")
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "campaign_characters",
+        },
+        () => {
+          void loadCloudCharacters();
+        }
+      )
+      .subscribe();
+
+    void loadCloudCharacters();
+
+    return () => {
+      active = false;
+      void supabase.removeChannel(channel);
+    };
   }, []);
 
-  /* Update character */
+  /* Update character in this screen and in the shared cloud table */
 
   const updateCharacter = (
     id: string,
     patch: Partial<Character>
   ) => {
-    const updated = characters.map((c) =>
-      c.id === id ? { ...c, ...patch } : c
+    const updated = characters.map((character) =>
+      character.id === id ? { ...character, ...patch } : character
     );
 
     setCharacters(updated);
 
-    localStorage.setItem(
-      "dnd-characters",
-      JSON.stringify(updated)
-    );
+    // Keep a local backup on this device.
+    localStorage.setItem("dnd-characters", JSON.stringify(updated));
+
+    const changedCharacter = updated.find((character) => character.id === id);
+    if (!changedCharacter) return;
+
+    setCloudStatus("Saving to cloud...");
+
+    void supabase
+      .from("campaign_characters")
+      .upsert(
+        {
+          id: changedCharacter.id,
+          name: changedCharacter.name || "Unnamed Adventurer",
+          data: changedCharacter,
+        },
+        { onConflict: "id" }
+      )
+      .then(({ error }) => {
+        if (error) {
+          console.error("Could not save character to cloud:", error);
+          setCloudStatus("Cloud save failed — local copy kept");
+        } else {
+          setCloudStatus("Cloud synced");
+        }
+      });
   };
 
   /* Helper maths */
 
+
+
   const modOf = (score: number) =>
+
     Math.floor(((score || 10) - 10) / 2);
 
+
+
   const profBonus = (level: number) =>
+
     Math.ceil((level || 1) / 4) + 1;
+
+
 
   /* Import party into combat */
 
+
+
   const loadPartyIntoCombat = () => {
+
     const pcCombatants: LiveCombatant[] = characters.map((c) => ({
+
       id: c.id,
+
       name: c.name,
+
       initiative: 10 + modOf(c.abilities?.dex),
+
       hpCurrent: c.hp?.current || 10,
+
       hpMax: c.hp?.max || 10,
+
       ac: c.ac || 10,
+
       isPlayer: true,
+
       notes: `${c.race} ${c.className}`,
+
     }));
 
+
+
     setCombatants((prev) => [
+
       ...prev.filter((x) => !x.isPlayer),
+
       ...pcCombatants,
+
     ]);
+
   };
+
+
 
   /* Add enemy */
 
+
+
   const addEnemyToCombat = () => {
+
     if (!newEnemyName.trim()) return;
 
+
+
     const enemy: LiveCombatant = {
+
       id: crypto.randomUUID(),
+
       name: newEnemyName.trim(),
+
       initiative: newEnemyInit,
+
       hpCurrent: newEnemyHp,
+
       hpMax: newEnemyHp,
+
       ac: newEnemyAc,
+
       isPlayer: false,
+
       notes: newEnemyNotes.trim(),
+
     };
+
+
 
     setCombatants((prev) => [...prev, enemy]);
 
+
+
     setNewEnemyName("");
+
     setNewEnemyNotes("");
+
   };
+
+
 
   /* Sort initiative */
 
+
+
   const sortInitiative = () => {
+
     setCombatants((prev) =>
+
       [...prev].sort(
+
         (a, b) => b.initiative - a.initiative
+
       )
+
     );
 
     setCurrentTurnIdx(0);
@@ -304,6 +468,10 @@ export default function DmScreenPage() {
             <p className="text-sm text-[#b8a17d]">
               Live party health, secret notes, rules index,
               and real-time initiative pad.
+
+              <span className="ml-2 text-xs text-[#e5bd70]">
+                ☁ {cloudStatus}
+              </span>
             </p>
           </div>
 
@@ -525,7 +693,7 @@ export default function DmScreenPage() {
                               {cmb.name}
                             </h4>
 
-                            <span
+                            <spa
                               className={`rounded border px-2 py-0.5 text-[10px] font-bold ${
                                 cmb.isPlayer
                                   ? "border-blue-600 bg-blue-900 text-blue-200"
@@ -791,7 +959,6 @@ export default function DmScreenPage() {
 
                           <label className="ml-auto flex items-center gap-1 text-xs text-[#b8a17d]">
                             Set AC:
-
                             <input
                               type="number"
                               value={c.ac || 10}
@@ -819,28 +986,39 @@ export default function DmScreenPage() {
                           </div>
 
                           <div className="rounded-lg border border-[#80643d] bg-[#211c17] p-2">
+
                             <span className="block text-[10px] text-[#b8a17d]">
+
                               Pass. Insight
+
                             </span>
 
                             <span className="text-base font-bold text-white">
+
                               {passiveInsight}
+
                             </span>
+
                           </div>
 
                           <div className="rounded-lg border border-[#80643d] bg-[#211c17] p-2">
+
                             <span className="block text-[10px] text-[#b8a17d]">
+
                               Pass. Invest.
+
+                            </span>
+                            <span className="text-base font-bold text-white">
+
+                              {passiveInvestigation}
+
                             </span>
 
-                            <span className="text-base font-bold text-white">
-                              {passiveInvestigation}
-                            </span>
                           </div>
+
                         </div>
 
                         {/* Conditions */}
-
                         {c.conditions && c.conditions.length > 0 && (
                           <div className="flex flex-wrap gap-1 pt-1">
                             {c.conditions.map((cond) => (
@@ -849,89 +1027,167 @@ export default function DmScreenPage() {
                                 className="rounded border border-red-700 bg-red-950 px-2 py-0.5 text-[10px] font-bold text-red-300"
                               >
                                 {cond}
+
                               </span>
+
                             ))}
+
                           </div>
+
                         )}
+
                       </div>
 
                       {/* Private DM notes */}
 
                       <div className="pt-2">
+
                         <label className="mb-1 block text-xs font-bold text-purple-300">
+
                           🔒 Secret DM Notes
+
                         </label>
 
                         <textarea
+
                           rows={3}
+
                           value={c.dmNotes || ""}
+
                           onChange={(e) =>
+
                             updateCharacter(c.id, {
+
                               dmNotes: e.target.value,
+
                             })
+
                           }
+
                           placeholder="Secret curse, plot hook, pending passive triggers..."
+
                           className={`${inputCls} w-full border-purple-800 bg-[#1c1524] text-xs font-mono`}
+
                         />
+
                       </div>
+
                     </section>
+
                   );
+
                 })}
+
               </div>
+
             )}
+
           </div>
+
         )}
 
+
+
         {/* ==================================================================
+
             RULES & DCS
+
            ================================================================== */}
 
+
+
         {activeTab === "rules" && (
+
           <div className="grid gap-6 md:grid-cols-2">
+
+
 
             {/* Difficulty classes */}
 
+
+
             <section className={panelCls}>
+
               <h3 className="mb-3 text-xl font-bold">
+
                 Difficulty Class (DC) Benchmarks
+
               </h3>
 
+
+
               <div className="overflow-x-auto">
+
                 <table className="w-full text-left text-xs">
+
                   <thead>
+
                     <tr className="border-b border-[#80643d] text-[#b8a17d]">
+
                       <th className="pb-2">DC</th>
+
                       <th className="pb-2">Difficulty</th>
+
                       <th className="pb-2">Example Challenge</th>
+
                     </tr>
+
                   </thead>
 
+
+
                   <tbody className="divide-y divide-[#80643d]/30">
+
                     {DIFFICULTY_CLASSES.map((d) => (
+
                       <tr key={d.dc}>
+
                         <td className="py-2.5 font-mono font-bold text-amber-300">
+
                           {d.dc}
+
                         </td>
+
+
 
                         <td className="py-2.5 font-bold text-white">
+
                           {d.task}
+
                         </td>
 
+
+
                         <td className="py-2.5 text-[#b8a17d]">
+
                           {d.example}
+
                         </td>
+
                       </tr>
+
                     ))}
+
                   </tbody>
+
                 </table>
+
               </div>
+
             </section>
+
+
 
             {/* Cover rules */}
 
+
+
             <section className={panelCls}>
+
               <h3 className="mb-3 text-xl font-bold">
+
                 Cover Rules
+
               </h3>
 
               <div className="space-y-3 text-xs">
@@ -941,6 +1197,7 @@ export default function DmScreenPage() {
                     className="rounded-lg border border-[#80643d]/60 bg-[#211c17] p-3"
                   >
                     <h4 className="mb-1 font-bold text-amber-300">
+
                       {c.type}
                     </h4>
 
