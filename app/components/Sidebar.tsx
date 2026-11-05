@@ -9,7 +9,7 @@ const baseNavigation = [
   { name: "DM Screen", icon: "👑", href: "/dm", dmOnly: true },
   { name: "Maps", icon: "🗺️", href: "/map" },
   { name: "Characters", icon: "👥", href: "/characters" },
-  { name: "Quests", icon: "📜", href: "/quests" },
+  { name: "Spellbook", icon: "📜", href: "/spells" },
   { name: "Journal", icon: "📖", href: "/journal" },
   { name: "Settings", icon: "⚙️", href: "/settings" },
 ];
